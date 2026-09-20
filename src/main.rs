@@ -281,7 +281,12 @@ async fn main() {
 
             let wheel = mouse_wheel().1;
             if wheel != 0.0 {
-                editor.zoom = (editor.zoom + wheel * 0.1).clamp(0.2, 5.0);
+                if wheel > 0.0 {
+                    editor.zoom *= 1.15;
+                } else {
+                    editor.zoom /= 1.15;
+                }
+                editor.zoom = editor.zoom.clamp(0.1, 10.0);
             }
         }
 
