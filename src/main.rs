@@ -3,7 +3,14 @@ use macroquad::prelude::*;
 
 const DEFAULT_MAP_WIDTH: usize = 20;
 const DEFAULT_MAP_HEIGHT: usize = 15;
-const TILE_DISPLAY_SIZE: f32 = 32.0;
+const TILE_DISPLAY_SIZE: f32 = 40.0;
+
+struct TileInfo {
+    id: usize,
+    name: String,
+    texture: Texture2D,
+    collision: bool,
+}
 
 struct MapEditor {
     map_width: usize,
@@ -11,11 +18,7 @@ struct MapEditor {
     tiles: Vec<i32>,
     selected_tile: i32,
 
-    tileset_texture: Option<Texture2D>,
-    tileset_image: Option<Image>,
-    tile_size_px: usize,
-    tiles_per_row: usize,
-    total_tiles: usize,
+    loaded_tiles: Vec<TileInfo>,
 
     camera_offset: Vec2,
     zoom: f32,
@@ -32,15 +35,11 @@ impl MapEditor {
             map_width,
             map_height,
             tiles,
-            selected_tile: 0,
-            tileset_texture: None,
-            tileset_image: None,
-            tile_size_px: 16,
-            tiles_per_row: 1,
-            total_tiles: 16,
+            selected_tile: -1,
+            loaded_tiles: Vec::new(),
             camera_offset: Vec2::ZERO,
             zoom: 1.0,
-            status_message: "Готово к работе. Загрузите тайлсет или рисуйте тайлами.".to_string(),
+            status_message: "Загрузите папку с тайлами (.png) для начала работы.".to_string(),
         }
     }
 
@@ -59,95 +58,136 @@ impl MapEditor {
         self.status_message = format!("Карта изменена: {}x{}", new_width, new_height);
     }
 
-    fn save_to_file(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().save_file() {
-            let mut content = String::new();
+    // Загрузка папки с тайлами
+    fn load_tiles_from_folder(&mut self) {
+        if let Some(folder_path) = rfd::FileDialog::new().pick_folder() {
+            // Очищаем старые тайлы, чтобы освободить память
+            self.loaded_tiles.clear();
+            let mut new_tiles = Vec::new();
+
+            if let Ok(entries) = std::fs::read_dir(&folder_path) {
+                let mut paths: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.extension()
+                            .and_then(|ext| ext.to_str())
+                            .map(|ext| ext.eq_ignore_ascii_case("png"))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+
+                paths.sort();
+
+                for (id, path) in paths.into_iter().enumerate() {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        let img = Image::from_file_with_format(&bytes, None);
+                        println!(
+                            "Загружен тайл: {:?} (размер: {}x{})",
+                            path.file_name(),
+                            img.width,
+                            img.height
+                        );
+
+                        let texture = Texture2D::from_image(&img);
+                        texture.set_filter(FilterMode::Nearest);
+
+                        let file_stem = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("tile")
+                            .to_string();
+
+                        new_tiles.push(TileInfo {
+                            id,
+                            name: file_stem,
+                            texture,
+                            collision: false,
+                        });
+                    }
+                }
+            }
+
+            if !new_tiles.is_empty() {
+                let count = new_tiles.len();
+                self.loaded_tiles = new_tiles;
+                self.selected_tile = 0;
+                self.status_message = format!("Загружено тайлов из папки: {}", count);
+            } else {
+                self.status_message = "В выбранной папке не найдено .png файлов.".to_string();
+            }
+        }
+    }
+
+    // Сохранение карты (чистый .txt только с индексами) и .tileset файла
+    fn save_project(&mut self) {
+        // 1. Сохраняем карту в чистом формате (индексы через пробел, построчно)
+        if let Some(map_path) = rfd::FileDialog::new().set_file_name("map.txt").save_file() {
+            let mut map_content = String::new();
             for y in 0..self.map_height {
                 let row_data: Vec<String> = (0..self.map_width)
                     .map(|x| self.tiles[y * self.map_width + x].to_string())
                     .collect();
-                content.push_str(&row_data.join(" "));
-                content.push('\n');
+                map_content.push_str(&row_data.join(" "));
+                map_content.push('\n');
             }
-            if let Err(e) = std::fs::write(&path, content) {
-                self.status_message = format!("Ошибка сохранения: {}", e);
-            } else {
-                self.status_message = format!("Карта сохранена в {:?}", path);
-            }
+            let _ = std::fs::write(&map_path, map_content);
         }
-    }
 
-    fn load_from_file(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().pick_file() {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    let mut new_tiles = Vec::new();
-                    let mut rows = 0;
-                    let mut cols = 0;
-
-                    for line in content.lines() {
-                        let line = line.trim();
-                        if line.is_empty() {
-                            continue;
-                        }
-                        let row_vals: Vec<i32> = line
-                            .split_whitespace()
-                            .filter_map(|s| s.parse().ok())
-                            .collect();
-                        if !row_vals.is_empty() {
-                            cols = row_vals.len();
-                            new_tiles.extend(row_vals);
-                            rows += 1;
-                        }
-                    }
-
-                    if rows > 0 && cols > 0 {
-                        self.map_width = cols;
-                        self.map_height = rows;
-                        self.tiles = new_tiles;
-                        self.status_message =
-                            format!("Карта загружена из {:?} ({}x{})", path, cols, rows);
-                    } else {
-                        self.status_message =
-                            "Ошибка: не удалось распарсить тайлы из файла.".to_string();
-                    }
-                }
-                Err(e) => {
-                    self.status_message = format!("Ошибка чтения файла: {}", e);
-                }
-            }
-        }
-    }
-
-    fn load_tileset(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg"])
-            .pick_file()
+        // 2. Сохраняем конфигурацию тайлсета (.tileset): [индекс] [имя] [true/false]
+        if let Some(tileset_path) = rfd::FileDialog::new()
+            .set_file_name("tileset.tileset")
+            .save_file()
         {
-            if let Ok(bytes) = std::fs::read(&path) {
-                let img = Image::from_file_with_format(&bytes, None);
-                let texture = Texture2D::from_image(&img);
-                texture.set_filter(FilterMode::Nearest);
+            let mut ts_content = String::new();
+            for tile in &self.loaded_tiles {
+                ts_content.push_str(&format!("{} {} {}\n", tile.id, tile.name, tile.collision));
+            }
+            if let Err(e) = std::fs::write(&tileset_path, ts_content) {
+                self.status_message = format!("Ошибка сохранения .tileset: {}", e);
+            } else {
+                self.status_message = "Карта и .tileset файл успешно сохранены!".to_string();
+            }
+        }
+    }
 
-                let w = img.width;
-                let h = img.height;
+    fn load_map_from_file(&mut self) {
+        if let Some(path) = rfd::FileDialog::new().pick_file() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let mut new_tiles = Vec::new();
+                let mut rows = 0;
+                let mut cols = 0;
 
-                self.tileset_image = Some(img);
-                self.tileset_texture = Some(texture);
-
-                if self.tile_size_px > 0 {
-                    let cols = w as usize / self.tile_size_px;
-                    let rows = h as usize / self.tile_size_px;
-                    self.tiles_per_row = cols.max(1);
-                    self.total_tiles = cols * rows;
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let row_vals: Vec<i32> = line
+                        .split_whitespace()
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
+                    if !row_vals.is_empty() {
+                        cols = row_vals.len();
+                        new_tiles.extend(row_vals);
+                        rows += 1;
+                    }
                 }
-                self.status_message = format!("Тайлсет загружен: {}x{} пикселей", w, h);
+
+                if rows > 0 && cols > 0 {
+                    self.map_width = cols;
+                    self.map_height = rows;
+                    self.tiles = new_tiles;
+                    self.status_message = format!("Карта загружена из файла ({}x{})", cols, rows);
+                } else {
+                    self.status_message = "Ошибка: не удалось распарсить файл карты.".to_string();
+                }
             }
         }
     }
 }
 
-#[macroquad::main("2D Tilemap Map Editor")]
+#[macroquad::main("2D Custom Tilemap Editor")]
 async fn main() {
     let mut editor = MapEditor::new();
     let mut last_mouse_pos = mouse_position();
@@ -168,7 +208,7 @@ async fn main() {
             egui_wants_pointer = ctx.wants_pointer_input();
 
             egui::SidePanel::left("control_panel")
-                .default_width(280.0)
+                .default_width(340.0)
                 .show(ctx, |ui| {
                     ui.heading("🗺️ Редактор Карт");
                     ui.separator();
@@ -176,12 +216,12 @@ async fn main() {
                     ui.label(&editor.status_message);
                     ui.separator();
 
-                    ui.collapsing("📁 Файл", |ui| {
-                        if ui.button("💾 Сохранить в .txt").clicked() {
-                            editor.save_to_file();
+                    ui.collapsing("📁 Проект", |ui| {
+                        if ui.button("💾 Сохранить карту и .tileset").clicked() {
+                            editor.save_project();
                         }
-                        if ui.button("📂 Загрузить из .txt").clicked() {
-                            editor.load_from_file();
+                        if ui.button("📂 Загрузить карту (.txt)").clicked() {
+                            editor.load_map_from_file();
                         }
                     });
 
@@ -203,43 +243,20 @@ async fn main() {
                         }
                     });
 
-                    ui.collapsing("🎨 Тайлсет", |ui| {
-                        if ui.button("📂 Загрузить картинку тайлсета").clicked()
+                    ui.collapsing("🎨 Загрузка тайлов", |ui| {
+                        if ui.button("📂 Выбрать папку с .png тайлами").clicked()
                         {
-                            editor.load_tileset();
+                            editor.load_tiles_from_folder();
                         }
-
-                        let mut tile_size = editor.tile_size_px as i32;
-                        ui.horizontal(|ui| {
-                            ui.label("Размер тайла (px):");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut tile_size)
-                                        .speed(1.0)
-                                        .clamp_range(4..=256),
-                                )
-                                .changed()
-                            {
-                                editor.tile_size_px = tile_size.max(4) as usize;
-                                if let Some(img) = &editor.tileset_image {
-                                    let cols = img.width as usize / editor.tile_size_px;
-                                    let rows = img.height as usize / editor.tile_size_px;
-                                    editor.tiles_per_row = cols.max(1);
-                                    editor.total_tiles = cols * rows;
-                                }
-                            }
-                        });
-
-                        ui.label(format!("Всего тайлов: {}", editor.total_tiles));
+                        ui.label(format!("Загружено тайлов: {}", editor.loaded_tiles.len()));
                     });
 
                     ui.separator();
-                    ui.heading("📦 Палитра тайлов");
-                    ui.label("ЛКМ - рисовать, ПКМ - стереть (-1)");
-                    ui.label("Зажатое колёсико или Пробел — двигать карту");
+                    ui.heading("📦 Палитра тайлов и Коллизии");
+                    ui.label("Кликните на тайл для выбора. Настройте коллизию.");
 
                     if ui
-                        .selectable_label(editor.selected_tile == -1, "🧹 Пусто (-1)")
+                        .selectable_label(editor.selected_tile == -1, "🧹 Ластик")
                         .clicked()
                     {
                         editor.selected_tile = -1;
@@ -248,32 +265,23 @@ async fn main() {
                     egui::ScrollArea::vertical()
                         .max_height(350.0)
                         .show(ui, |ui| {
-                            let available_width = ui.available_width();
-                            let item_size = 40.0;
-                            let items_per_row =
-                                (available_width / (item_size + 6.0)).floor().max(1.0) as usize;
+                            for tile in &mut editor.loaded_tiles {
+                                let is_selected = editor.selected_tile == tile.id as i32;
 
-                            let total = editor.total_tiles;
-                            let mut current_id = 0;
-
-                            while current_id < total {
                                 ui.horizontal(|ui| {
-                                    let row_end = (current_id + items_per_row).min(total);
-                                    for id in current_id..row_end {
-                                        let is_selected = editor.selected_tile == id as i32;
-                                        let btn_text = format!("#{}", id);
-                                        if ui.selectable_label(is_selected, btn_text).clicked() {
-                                            editor.selected_tile = id as i32;
-                                        }
+                                    let label_text = format!("#{} [{}]", tile.id, tile.name);
+                                    if ui.selectable_label(is_selected, label_text).clicked() {
+                                        editor.selected_tile = tile.id as i32;
                                     }
-                                    current_id = row_end;
+
+                                    ui.checkbox(&mut tile.collision, "Коллизия");
                                 });
                             }
                         });
                 });
         });
 
-        // Обработка панорамирования холста
+        // Навигация (панорамирование и зум)
         if !egui_wants_pointer {
             if is_mouse_button_down(MouseButton::Middle) || is_key_down(KeyCode::Space) {
                 editor.camera_offset += mouse_delta;
@@ -290,7 +298,7 @@ async fn main() {
             }
         }
 
-        // Рендеринг сетки карты и тайлов
+        // Рендеринг холста карты
         let map_pixel_width = editor.map_width as f32 * TILE_DISPLAY_SIZE * editor.zoom;
         let map_pixel_height = editor.map_height as f32 * TILE_DISPLAY_SIZE * editor.zoom;
 
@@ -307,28 +315,21 @@ async fn main() {
                 let size = TILE_DISPLAY_SIZE * editor.zoom;
 
                 let mut rendered = false;
-                if let Some(tex) = &editor.tileset_texture {
-                    if tile_id >= 0 && (tile_id as usize) < editor.total_tiles {
-                        let cols = editor.tiles_per_row as i32;
-                        if cols > 0 {
-                            let tx = (tile_id % cols) as f32 * editor.tile_size_px as f32;
-                            let ty = (tile_id / cols) as f32 * editor.tile_size_px as f32;
-                            let tw = editor.tile_size_px as f32;
-                            let th = editor.tile_size_px as f32;
-
-                            draw_texture_ex(
-                                *tex,
-                                tile_screen_x,
-                                tile_screen_y,
-                                WHITE,
-                                DrawTextureParams {
-                                    dest_size: Some(Vec2::new(size, size)),
-                                    source: Some(Rect::new(tx, ty, tw, th)),
-                                    ..Default::default()
-                                },
-                            );
-                            rendered = true;
-                        }
+                if tile_id >= 0 {
+                    if let Some(tile_info) =
+                        editor.loaded_tiles.iter().find(|t| t.id as i32 == tile_id)
+                    {
+                        draw_texture_ex(
+                            tile_info.texture,
+                            tile_screen_x,
+                            tile_screen_y,
+                            WHITE,
+                            DrawTextureParams {
+                                dest_size: Some(Vec2::new(size, size)),
+                                ..Default::default()
+                            },
+                        );
+                        rendered = true;
                     }
                 }
 
@@ -336,13 +337,7 @@ async fn main() {
                     let bg_color = if tile_id == -1 {
                         Color::new(0.2, 0.2, 0.25, 1.0)
                     } else {
-                        let hue = ((tile_id * 50) % 360) as f32;
-                        Color::from_vec(vec4(
-                            (hue / 60.0).sin() * 0.5 + 0.5,
-                            ((hue + 120.0) / 60.0).sin() * 0.5 + 0.5,
-                            ((hue + 240.0) / 60.0).sin() * 0.5 + 0.5,
-                            1.0,
-                        ))
+                        Color::new(0.5, 0.2, 0.2, 1.0)
                     };
 
                     draw_rectangle(tile_screen_x, tile_screen_y, size, size, bg_color);
