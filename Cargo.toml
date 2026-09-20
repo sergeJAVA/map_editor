@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-macroquad = "0.4"
-egui-macroquad = "0.4"
+macroquad = "0.3.26"
+egui-macroquad = "0.15.0"
 rfd = "0.15"
