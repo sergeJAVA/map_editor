@@ -1,9 +1,22 @@
 use egui_macroquad::egui;
 use macroquad::prelude::*;
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 const DEFAULT_MAP_WIDTH: usize = 20;
 const DEFAULT_MAP_HEIGHT: usize = 15;
 const TILE_DISPLAY_SIZE: f32 = 40.0;
+
+fn print_mem_mb(system: &mut System, label: &str) {
+    let pid = Pid::from_u32(std::process::id());
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]));
+    if let Some(process) = system.process(pid) {
+        println!(
+            "[{}] RAM: {:.2} MB",
+            label,
+            process.memory() as f64 / 1024.0 / 1024.0
+        );
+    }
+}
 
 struct TileInfo {
     id: usize,
@@ -29,7 +42,7 @@ impl MapEditor {
     fn new() -> Self {
         let map_width = DEFAULT_MAP_WIDTH;
         let map_height = DEFAULT_MAP_HEIGHT;
-        let tiles = vec![0; map_width * map_height];
+        let tiles = vec![-1; map_width * map_height]; // по умолчанию заполняем пустыми тайлами (-1)
 
         Self {
             map_width,
@@ -44,7 +57,7 @@ impl MapEditor {
     }
 
     fn resize_map(&mut self, new_width: usize, new_height: usize) {
-        let mut new_tiles = vec![0; new_width * new_height];
+        let mut new_tiles = vec![-1; new_width * new_height]; // новые области пустые (-1)
         for y in 0..new_height.min(self.map_height) {
             for x in 0..new_width.min(self.map_width) {
                 let old_idx = y * self.map_width + x;
@@ -58,10 +71,8 @@ impl MapEditor {
         self.status_message = format!("Карта изменена: {}x{}", new_width, new_height);
     }
 
-    // Загрузка папки с тайлами
     fn load_tiles_from_folder(&mut self) {
         if let Some(folder_path) = rfd::FileDialog::new().pick_folder() {
-            // Очищаем старые тайлы, чтобы освободить память
             self.loaded_tiles.clear();
             let mut new_tiles = Vec::new();
 
@@ -82,13 +93,6 @@ impl MapEditor {
                 for (id, path) in paths.into_iter().enumerate() {
                     if let Ok(bytes) = std::fs::read(&path) {
                         let img = Image::from_file_with_format(&bytes, None);
-                        println!(
-                            "Загружен тайл: {:?} (размер: {}x{})",
-                            path.file_name(),
-                            img.width,
-                            img.height
-                        );
-
                         let texture = Texture2D::from_image(&img);
                         texture.set_filter(FilterMode::Nearest);
 
@@ -112,6 +116,7 @@ impl MapEditor {
                 let count = new_tiles.len();
                 self.loaded_tiles = new_tiles;
                 self.selected_tile = 0;
+                build_textures_atlas();
                 self.status_message = format!("Загружено тайлов из папки: {}", count);
             } else {
                 self.status_message = "В выбранной папке не найдено .png файлов.".to_string();
@@ -119,9 +124,7 @@ impl MapEditor {
         }
     }
 
-    // Сохранение карты (чистый .txt только с индексами) и .tileset файла
     fn save_project(&mut self) {
-        // 1. Сохраняем карту в чистом формате (индексы через пробел, построчно)
         if let Some(map_path) = rfd::FileDialog::new().set_file_name("map.txt").save_file() {
             let mut map_content = String::new();
             for y in 0..self.map_height {
@@ -134,7 +137,6 @@ impl MapEditor {
             let _ = std::fs::write(&map_path, map_content);
         }
 
-        // 2. Сохраняем конфигурацию тайлсета (.tileset): [индекс] [имя] [true/false]
         if let Some(tileset_path) = rfd::FileDialog::new()
             .set_file_name("tileset.tileset")
             .save_file()
@@ -191,6 +193,8 @@ impl MapEditor {
 async fn main() {
     let mut editor = MapEditor::new();
     let mut last_mouse_pos = mouse_position();
+    let mut sys = System::new_all();
+    print_mem_mb(&mut sys, "старт");
 
     loop {
         clear_background(Color::new(0.15, 0.15, 0.18, 1.0));
@@ -256,7 +260,7 @@ async fn main() {
                     ui.label("Кликните на тайл для выбора. Настройте коллизию.");
 
                     if ui
-                        .selectable_label(editor.selected_tile == -1, "🧹 Ластик")
+                        .selectable_label(editor.selected_tile == -1, "🧹 Ластик (Пусто: -1)")
                         .clicked()
                     {
                         editor.selected_tile = -1;
@@ -305,6 +309,12 @@ async fn main() {
         let start_x = editor.camera_offset.x + screen_width() / 2.0 - map_pixel_width / 2.0;
         let start_y = editor.camera_offset.y + screen_height() / 2.0 - map_pixel_height / 2.0;
 
+        // Видимая область экрана для Frustum Culling
+        let screen_w = screen_width();
+        let screen_h = screen_height();
+
+        let mut hovered_tile_pos = None;
+        // Проход 1
         for y in 0..editor.map_height {
             for x in 0..editor.map_width {
                 let idx = y * editor.map_width + x;
@@ -314,11 +324,28 @@ async fn main() {
                 let tile_screen_y = start_y + y as f32 * TILE_DISPLAY_SIZE * editor.zoom;
                 let size = TILE_DISPLAY_SIZE * editor.zoom;
 
+                if tile_screen_x + size < 0.0
+                    || tile_screen_x > screen_w
+                    || tile_screen_y + size < 0.0
+                    || tile_screen_y > screen_h
+                {
+                    continue;
+                }
+
+                let mx = current_mouse_pos.0;
+                let my = current_mouse_pos.1;
+                if !egui_wants_pointer
+                    && mx >= tile_screen_x
+                    && mx < tile_screen_x + size
+                    && my >= tile_screen_y
+                    && my < tile_screen_y + size
+                {
+                    hovered_tile_pos = Some((tile_id, tile_screen_x, tile_screen_y, size));
+                }
+
                 let mut rendered = false;
                 if tile_id >= 0 {
-                    if let Some(tile_info) =
-                        editor.loaded_tiles.iter().find(|t| t.id as i32 == tile_id)
-                    {
+                    if let Some(tile_info) = editor.loaded_tiles.get(tile_id as usize) {
                         draw_texture_ex(
                             tile_info.texture,
                             tile_screen_x,
@@ -339,17 +366,24 @@ async fn main() {
                     } else {
                         Color::new(0.5, 0.2, 0.2, 1.0)
                     };
-
                     draw_rectangle(tile_screen_x, tile_screen_y, size, size, bg_color);
-                    if tile_id != -1 {
-                        draw_text(
-                            &tile_id.to_string(),
-                            tile_screen_x + 4.0,
-                            tile_screen_y + size - 6.0,
-                            size * 0.4,
-                            WHITE,
-                        );
-                    }
+                }
+            }
+        }
+
+        // ПРОХОД 2: только линии сетки, отдельно, чтобы не дёргать draw call между тайлами
+        for y in 0..editor.map_height {
+            for x in 0..editor.map_width {
+                let tile_screen_x = start_x + x as f32 * TILE_DISPLAY_SIZE * editor.zoom;
+                let tile_screen_y = start_y + y as f32 * TILE_DISPLAY_SIZE * editor.zoom;
+                let size = TILE_DISPLAY_SIZE * editor.zoom;
+
+                if tile_screen_x + size < 0.0
+                    || tile_screen_x > screen_w
+                    || tile_screen_y + size < 0.0
+                    || tile_screen_y > screen_h
+                {
+                    continue;
                 }
 
                 draw_rectangle_lines(
@@ -358,7 +392,22 @@ async fn main() {
                     size,
                     size,
                     1.0,
-                    Color::new(0.3, 0.3, 0.35, 0.5),
+                    Color::new(0.3, 0.3, 0.35, 0.3),
+                );
+            }
+        }
+
+        // Подсвечиваем ячейку под курсором и пишем её ID (только одну!)
+        if let Some((tile_id, tx, ty, t_size)) = hovered_tile_pos {
+            draw_rectangle_lines(tx, ty, t_size, t_size, 2.0, YELLOW);
+            if tile_id != -1 {
+                let info_text = format!("ID: {}", tile_id);
+                draw_text(
+                    &info_text,
+                    tx + 4.0,
+                    ty + t_size - 6.0,
+                    (t_size * 0.4).clamp(12.0, 24.0),
+                    YELLOW,
                 );
             }
         }
@@ -388,6 +437,9 @@ async fn main() {
                     }
                 }
             }
+        }
+        if is_key_pressed(KeyCode::M) {
+            print_mem_mb(&mut sys, "замер");
         }
 
         egui_macroquad::draw();
