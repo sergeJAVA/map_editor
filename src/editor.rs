@@ -112,6 +112,7 @@ impl MapEditor {
             if !new_tiles.is_empty() {
                 let count = new_tiles.len();
                 self.loaded_tiles = new_tiles;
+                build_textures_atlas();
                 self.selected_tile = 0;
                 self.status_message = format!("Загружено тайлов из папки: {}", count);
             } else {

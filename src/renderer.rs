@@ -35,7 +35,16 @@ pub fn render_and_handle_canvas(
 
     let mut hovered_tile_pos = None;
 
-    // ПРОХОД 1: Отрисовка тайлов и подложки (с Frustum Culling)
+    // Собираем видимые клетки (с учётом Frustum Culling) вместо отрисовки сразу
+    struct VisibleCell {
+        tile_id: i32,
+        screen_x: f32,
+        screen_y: f32,
+        size: f32,
+    }
+    let mut visible_cells: Vec<VisibleCell> =
+        Vec::with_capacity(editor.map_width * editor.map_height);
+
     for y in 0..editor.map_height {
         for x in 0..editor.map_width {
             let idx = y * editor.map_width + x;
@@ -64,31 +73,42 @@ pub fn render_and_handle_canvas(
                 hovered_tile_pos = Some((tile_id, tile_screen_x, tile_screen_y, size));
             }
 
-            let mut rendered = false;
-            if tile_id >= 0 {
-                if let Some(tile_info) = editor.loaded_tiles.get(tile_id as usize) {
-                    draw_texture_ex(
-                        tile_info.texture,
-                        tile_screen_x,
-                        tile_screen_y,
-                        WHITE,
-                        DrawTextureParams {
-                            dest_size: Some(Vec2::new(size, size)),
-                            ..Default::default()
-                        },
-                    );
-                    rendered = true;
-                }
-            }
+            visible_cells.push(VisibleCell {
+                tile_id,
+                screen_x: tile_screen_x,
+                screen_y: tile_screen_y,
+                size,
+            });
+        }
+    }
 
-            if !rendered {
-                let bg_color = if tile_id == -1 {
-                    Color::new(0.2, 0.2, 0.25, 1.0)
-                } else {
-                    Color::new(0.5, 0.2, 0.2, 1.0)
-                };
-                draw_rectangle(tile_screen_x, tile_screen_y, size, size, bg_color);
+    // Группируем по tile_id — все клетки одной текстуры идут подряд, батч не рвётся между ними
+    visible_cells.sort_by_key(|c| c.tile_id);
+
+    for cell in &visible_cells {
+        let mut rendered = false;
+        if cell.tile_id >= 0 {
+            if let Some(tile_info) = editor.loaded_tiles.get(cell.tile_id as usize) {
+                draw_texture_ex(
+                    tile_info.texture,
+                    cell.screen_x,
+                    cell.screen_y,
+                    WHITE,
+                    DrawTextureParams {
+                        dest_size: Some(Vec2::new(cell.size, cell.size)),
+                        ..Default::default()
+                    },
+                );
+                rendered = true;
             }
+        }
+        if !rendered {
+            let bg_color = if cell.tile_id == -1 {
+                Color::new(0.2, 0.2, 0.25, 1.0)
+            } else {
+                Color::new(0.5, 0.2, 0.2, 1.0)
+            };
+            draw_rectangle(cell.screen_x, cell.screen_y, cell.size, cell.size, bg_color);
         }
     }
 
